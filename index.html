@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>베이커리 실시간 픽업 예약</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  :root {
+    --primary: hsl(210, 70%, 55%);
+    --primary-dark: hsl(210, 70%, 45%);
+    --accent: hsl(340, 80%, 60%);
+    --bg: #f0f4f8;
+    --glass: rgba(255,255,255,0.2);
+    --radius: 12px;
+    --transition: 0.2s ease;
+    --font: 'Helvetica Neue', Arial, sans-serif;
+  }
+  body {
+    margin:0; font-family: var(--font); background: var(--bg);
+    display:flex; flex-direction:column; align-items:center;
+    min-height:100vh;
+  }
+  h1 { margin: .5rem 0; color:#333; }
+  .card {
+    background: var(--glass);
+    backdrop-filter: blur(10px);
+    border-radius: var(--radius);
+    box-shadow: 0 8px 16px rgba(0,0,0,.1);
+    padding: 1.5rem;
+    margin: 1rem;
+    width: 90%;
+    max-width: 500px;
+    animation: fadeIn .4s;
+  }
+  @keyframes fadeIn { from {opacity:0; transform:translateY(10px)} to {opacity:1; transform:none} }
+
+  /* ---------- Login modal ---------- */
+  #loginModal {
+    position:fixed; inset:0; background:rgba(0,0,0,.4);
+    display:flex; align-items:center; justify-content:center;
+    visibility:hidden; opacity:0; transition:opacity .3s;
+  }
+  #loginModal.show { visibility:visible; opacity:1; }
+  #loginBox {
+    background:#fff; border-radius: var(--radius);
+    padding:2rem; width:320px; box-shadow:0 4px 12px rgba(0,0,0,.2);
+  }
+  #loginBox input { width:100%; padding:.5rem; margin:.5rem 0; border:1px solid #ccc; border-radius:4px; }
+  #loginBox button { width:100%; padding:.6rem; background:var(--primary); color:#fff; border:none; border-radius:4px; cursor:pointer; transition:background var(--transition); }
+  #loginBox button:hover { background:var(--primary-dark); }
+
+  /* ---------- Product list ---------- */
+  .product { display:flex; justify-content:space-between; align-items:center; margin:1rem 0; }
+  .product-info { flex:1; }
+  .product-name { font-weight:600; }
+  .stock-bar {
+    height:12px; border-radius:6px; background:#e0e0e0; overflow:hidden; margin:.4rem 0;
+  }
+  .stock-fill {
+    height:100%; background:var(--accent);
+    transition:width var(--transition);
+  }
+  .product-controls { display:flex; align-items:center; gap:.5rem; }
+  .product-controls button {
+    background:var(--primary); color:#fff; border:none; border-radius:4px;
+    padding:.4rem .8rem; cursor:pointer; transition:background var(--transition);
+  }
+  .product-controls button:disabled { background:#aaa; cursor:not-allowed; }
+  .product-controls button:hover:not(:disabled) { background:var(--primary-dark); }
+
+  /* ---------- Cart ---------- */
+  #cart { border-top:1px solid #ddd; padding-top:1rem; }
+  #cartTimer { font-weight:600; color:#d00; }
+  #checkoutBtn {
+    width:100%; padding:.6rem; margin-top:.8rem;
+    background:var(--accent); color:#fff; border:none; border-radius:4px;
+    cursor:pointer; transition:background var(--transition);
+  }
+  #checkoutBtn:disabled { background:#aaa; cursor:not-allowed; }
+  #checkoutBtn:hover:not(:disabled) { background:hsl(340,80%,50%); }
+
+  /* ---------- Time slots ---------- */
+  .slots { display:grid; grid-template-columns:repeat(2,1fr); gap:.5rem; margin-top:.5rem; }
+  .slot {
+    padding:.5rem; text-align:center; border-radius:6px;
+    background:#fff; border:1px solid #ccc; cursor:pointer;
+    transition:background var(--transition),border var(--transition);
+  }
+  .slot.disabled { background:#f5f5f5; color:#777; cursor:not-allowed; border-color:#ddd; }
+  .slot.selected { background:var(--primary); color:#fff; border-color:var(--primary-dark); }
+
+  /* ---------- QR result ---------- */
+  #qrResult { text-align:center; margin-top:1rem; }
+  #qrResult canvas { margin-top:.5rem; }
+
+</style>
+</head>
+<body>
+
+<h1>🍞 베이커리 픽업 예약</h1>
+
+<div class="card" id="productSection">
+  <h2>상품 목록</h2>
+  <div id="productList"></div>
+</div>
+
+<div class="card" id="slotSection" style="display:none;">
+  <h2>픽업 시간대 선택</h2>
+  <div class="slots" id="slotGrid"></div>
+</div>
+
+<div class="card" id="cartSection" style="display:none;">
+  <h2>장바구니</h2>
+  <div id="cartDetails"></div>
+  <div>잠금 시간: <span id="cartTimer">05:00</span></div>
+  <button id="checkoutBtn" disabled>결제 및 QR 발급</button>
+  <div id="qrResult"></div>
+</div>
+
+<!-- ---------- Login Modal ---------- -->
+<div id="loginModal">
+  <div id="loginBox">
+    <h3>로그인</h3>
+    <input type="text" id="loginUser" placeholder="아이디">
+    <input type="password" id="loginPass" placeholder="비밀번호">
+    <button id="loginBtn">로그인</button>
+  </div>
+</div>
+
+<script>
+/* ---------- Mock Data ---------- */
+const mockUser = { id: 1, name: "홍길동", phone:"010-1234-5678", penalties:0 };
+const MAX_PER_USER = 3;           // 최대 구매 개수
+const CART_LOCK_MS = 5 * 60 * 1000; // 5분
+
+let products = [
+  { id:101, name:"초코 크루아상", price:3500, stock:12, total:20 },
+  { id:102, name:"레몬 타르트", price:4200, stock:5, total:10 },
+  { id:103, name:"베리 머핀", price:3800, stock:0, total:15 }
+];
+
+let timeSlots = [
+  { id:"1200_1230", label:"12:00~12:30", capacity:15, booked:12 },
+  { id:"1230_1300", label:"12:30~13:00", capacity:15, booked:15 },
+  { id:"1300_1330", label:"13:00~13:30", capacity:15, booked:8 },
+  { id:"1330_1400", label:"13:30~14:00", capacity:15, booked:15 },
+  { id:"1400_1430", label:"14:00~14:30", capacity:15, booked:3 },
+  { id:"1430_1500", label:"14:30~15:00", capacity:15, booked:7 }
+];
+
+let cart = { items: [], lockExpires: null, slot: null };
+
+/* ---------- UI Rendering ---------- */
+function renderProducts() {
+  const list = document.getElementById('productList');
+  list.innerHTML = '';
+  products.forEach(p=>{
+    const div = document.createElement('div');
+    div.className='product';
+    div.innerHTML = `
+      <div class="product-info">
+        <div class="product-name">${p.name}</div>
+        <div class="stock-bar"><div class="stock-fill" style="width:${(p.stock/p.total)*100}%"></div></div>
+        <small>재고 ${p.stock}/${p.total}</small>
+      </div>
+      <div class="product-controls">
+        <input type="number" min="1" max="${MAX_PER_USER}" value="1" id="qty-${p.id}" style="width:45px;">
+        <button data-id="${p.id}" class="addBtn" ${p.stock===0?'disabled':''}>담기</button>
+      </div>
+    `;
+    list.appendChild(div);
+  });
+  document.querySelectorAll('.addBtn').forEach(btn=>{
+    btn.onclick = e=>addToCart(parseInt(e.target.dataset.id));
+  });
+}
+
+function renderSlots() {
+  const grid = document.getElementById('slotGrid');
+  grid.innerHTML = '';
+  timeSlots.forEach(s=>{
+    const div = document.createElement('div');
+    const remaining = s.capacity - s.booked;
+    const disabled = remaining<=0;
+    div.className = `slot ${disabled?'disabled':''}`;
+    div.dataset.id = s.id;
+    div.textContent = `${s.label} (${remaining}/${s.capacity})`;
+    if(!disabled){
+      div.onclick = ()=>selectSlot(s.id);
+    }
+    grid.appendChild(div);
+  });
+}
+
+function renderCart() {
+  const details = document.getElementById('cartDetails');
+  const checkout = document.getElementById('checkoutBtn');
+
+  if(cart.items.length===0){
+    details.textContent = '장바구니가 비었습니다.';
+    checkout.disabled = true;
+    return;
+  }
+
+  let html = '<ul>';
+  cart.items.forEach(i=>{
+    html += `<li>${i.product.name} × ${i.qty}</li>`;
+  });
+  html += '</ul>';
+  details.innerHTML = html;
+
+  // Enable checkout only when a time slot is chosen
+  checkout.disabled = !cart.slot;
+}
+
+/* ---------- Cart Logic ---------- */
+function addToCart(productId){
+  const product = products.find(p=>p.id===productId);
+  const qtyInput = document.getElementById(`qty-${productId}`);
+  let qty = Math.min(parseInt(qtyInput.value)||1, MAX_PER_USER);
+  if(product.stock < qty){
+    alert('재고가 부족합니다.');
+    return;
+  }
+  // Reserve stock
+  product.stock -= qty;
+  // Add to cart or increase quantity
+  const existing = cart.items.find(i=>i.product.id===productId);
+  if(existing){
+    existing.qty += qty;
+  } else {
+    cart.items.push({product, qty});
+  }
+  // Start / refresh lock timer
+  cart.lockExpires = Date.now() + CART_LOCK_MS;
+  startLockTimer();
+  renderProducts();
+  renderCart();
+  document.getElementById('slotSection').style.display='block';
+  document.getElementById('cartSection').style.display='block';
+}
+
+function startLockTimer(){
+  const timerEl = document.getElementById('cartTimer');
+  const interval = setInterval(()=>{
+    const remaining = cart.lockExpires - Date.now();
+    if(remaining<=0){
+      clearInterval(interval);
+      releaseCart();
+      timerEl.textContent='00:00';
+    }else{
+      const mins = String(Math.floor(remaining/60000)).padStart(2,'0');
+      const secs = String(Math.floor((remaining%60000)/1000)).padStart(2,'0');
+      timerEl.textContent=`${mins}:${secs}`;
+    }
+  },1000);
+}
+
+/* Release cart when timer expires */
+function releaseCart(){
+  // Return stock to inventory
+  cart.items.forEach(i=>{ i.product.stock += i.qty; });
+  cart = { items: [], lockExpires: null, slot: null };
+  renderProducts();
+  renderCart();
+  document.getElementById('slotSection').style.display='none';
+  document.getElementById('cartSection').style.display='none';
+}
+
+/* ---------- Slot Selection ---------- */
+function selectSlot(slotId){
+  // Deselect previous
+  document.querySelectorAll('.slot.selected').forEach(el=>el.classList.remove('selected'));
+  // Select new
+  const el = document.querySelector(`.slot[data-id="${slotId}"]`);
+  el.classList.add('selected');
+  cart.slot = timeSlots.find(s=>s.id===slotId);
+  renderCart();
+}
+
+/* ---------- Checkout & QR generation ---------- */
+document.getElementById('checkoutBtn').onclick = ()=>{
+  // Simulate payment success
+  const orderId = 'ORD' + Date.now();
+  // Update DB mock (increase booked count)
+  cart.slot.booked += cart.items.reduce((sum,i)=>sum+i.qty,0);
+  // Show QR
+  showQR(orderId);
+  // Clean up cart UI
+  document.getElementById('checkoutBtn').disabled = true;
+};
+
+function showQR(orderId){
+  const resultDiv = document.getElementById('qrResult');
+  resultDiv.innerHTML = `<p>예약 완료! 주문번호: ${orderId}</p><canvas id="qrCanvas"></canvas>`;
+  generateQRCode(orderId);
+  // Refresh slots to reflect new capacity
+  renderSlots();
+}
+
+/* ---------- Simple QR Code generator (no external libs) ---------- */
+function generateQRCode(text){
+  const canvas = document.getElementById('qrCanvas');
+  const size = 200;
+  canvas.width = size; canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  // Very naive QR generation – just encode as a hash pattern for demo
+  // In production use a proper QR library.
+  const hash = Array.from(text).reduce((a,ch)=>a+ch.charCodeAt(0),0);
+  const cellSize = size/25;
+  for(let y=0;y<25;y++){
+    for(let x=0;x<25;x++){
+      const shouldFill = ((x+y+hash)%2===0);
+      ctx.fillStyle = shouldFill ? '#000' : '#fff';
+      ctx.fillRect(x*cellSize, y*cellSize, cellSize, cellSize);
+    }
+  }
+}
+
+/* ---------- Login Flow (mock) ---------- */
+function showLogin(){
+  document.getElementById('loginModal').classList.add('show');
+}
+function hideLogin(){
+  document.getElementById('loginModal').classList.remove('show');
+}
+document.getElementById('loginBtn').onclick = ()=>{
+  // Simple check (no real auth)
+  const user = document.getElementById('loginUser').value.trim();
+  const pass = document.getElementById('loginPass').value;
+  if(user && pass){
+    hideLogin();
+    alert(`환영합니다, ${mockUser.name}님!`);
+  } else {
+    alert('아이디와 비밀번호를 입력해 주세요.');
+  }
+};
+
+/* ---------- Init ---------- */
+window.onload = ()=>{
+  showLogin();
+  renderProducts();
+};
+</script>
+</body>
+</html>
